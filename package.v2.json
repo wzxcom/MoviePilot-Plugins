@@ -1150,5 +1150,20 @@
       "v1.1.0": "将任务队列、GPU 推理和 FFmpeg 流水线直接集成到 MoviePilot 插件",
       "v1.0.0": "首个版本：支持服务状态、模型下载与校验、任务提交和管理"
     }
+  },
+  "HDBlueSignin": {
+    "v3": false,
+    "name": "蓝影论坛签到",
+    "description": "使用专用密钥自动签到蓝影论坛，支持随机错峰、结果通知与签到记录。",
+    "labels": "蓝影,论坛,签到",
+    "version": "1.0.0",
+    "icon": "https://hdblue.cc/icon.svg",
+    "author": "wzxcom",
+    "level": 1,
+    "release": false,
+    "system_version": ">=2.12.0,<3",
+    "history": {
+      "v1.0.0": "首次发布：专用签到密钥、北京时间定时与随机错峰、有限重试、连接测试及密钥保护。"
+    }
   }
 }
