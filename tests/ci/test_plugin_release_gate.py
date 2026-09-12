@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECKER = REPO_ROOT / ".github/scripts/check_plugin_versions.py"
@@ -148,8 +150,8 @@ def test_checker_validates_all_v3_entries_in_v3_directory(tmp_path: Path) -> Non
     assert "版本不一致" in result.stdout
 
 
-def test_checker_rejects_v3_patch_bump_and_unsorted_history(tmp_path: Path) -> None:
-    """V3 副本误用补丁版本或历史倒序时必须被发布门禁拒绝。"""
+def test_checker_rejects_v3_legacy_major_and_unsorted_history(tmp_path: Path) -> None:
+    """V3 副本停留旧代主版本或历史倒序时必须被发布门禁拒绝。"""
     repo = tmp_path / "repo"
     plugin_dir = repo / "plugins.v3/example"
     plugin_dir.mkdir(parents=True)
@@ -178,7 +180,66 @@ def test_checker_rejects_v3_patch_bump_and_unsorted_history(tmp_path: Path) -> N
 
     assert result.returncode == 1
     assert "history 未按语义版本降序排列" in result.stdout
-    assert "V3 版本应从旧代 2.6.1 跃迁至 3.0.0" in result.stdout
+    assert "V3 版本应与旧代 2.6.1 保持大版本跃迁" in result.stdout
+
+
+def _write_v3_fixture(repo: Path, version: str, history: dict[str, str]) -> None:
+    """构造有独立 V2 实现的 V3 索引，覆盖迁移后发布且不混用旧代源码。"""
+    _write_fixture(repo, package_version="2.6.1", source_version="2.6.1")
+    plugin_dir = repo / "plugins.v3/example"
+    plugin_dir.mkdir(parents=True)
+    (repo / "package.v3.json").write_text(
+        json.dumps({"Example": {"version": version, "release": False, "history": history}}),
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        f'class Example:\n    plugin_version = "{version}"\n',
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("version", ["3.0.0", "3.0.1", "3.2.0"])
+def test_checker_accepts_v3_initial_patch_and_minor_releases(tmp_path: Path, version: str) -> None:
+    """迁移主版本内的首发、补丁与次版本均合法，并同时维持独立 V2 版本门禁。"""
+    history = {f"v{version}": "当前版本"}
+    if version != "3.0.0":
+        history["v3.0.0"] = "首次适配 V3"
+    history["v2.6.1"] = "V2 历史"
+    _write_v3_fixture(tmp_path, version, history)
+
+    result = _run_checker(tmp_path, "package.v2.json", "package.v3.json")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("version", ["2.9.9", "4.0.0"])
+def test_checker_rejects_v3_outside_expected_major(tmp_path: Path, version: str) -> None:
+    """与官方门禁保持一致：允许主版本内迭代，不额外放宽旧代或跨主版本发布。"""
+    _write_v3_fixture(tmp_path, version, {f"v{version}": "错误主版本"})
+
+    result = _run_checker(tmp_path, "package.v3.json")
+
+    assert result.returncode == 1
+    assert "主版本 3.x" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("history", "message"),
+    [
+        ({"v3.0.0": "未置顶当前版本"}, "history 首项 v3.0.0 与当前版本 3.0.1 不一致"),
+        ({"v3.0.1": "当前版本", "v3.1.0": "错误排序"}, "history 未按语义版本降序排列"),
+    ],
+)
+def test_checker_keeps_v3_patch_history_contract(
+    tmp_path: Path, history: dict[str, str], message: str
+) -> None:
+    """放行补丁版本不应跳过当前版本置顶和历史降序规则。"""
+    _write_v3_fixture(tmp_path, "3.0.1", history)
+
+    result = _run_checker(tmp_path, "package.v3.json")
+
+    assert result.returncode == 1
+    assert message in result.stdout
 
 
 def test_pre_push_propagates_version_gate_failure(tmp_path: Path) -> None:
