@@ -317,6 +317,66 @@ def test_page_and_form_never_send_requests_or_expose_key(plugin):
     assert '"type": "password"' in content
 
 
+def test_form_preserves_all_models_defaults_and_input_contracts(plugin):
+    form, defaults = plugin.get_form()
+    cells = form[0]["content"][0]["content"]
+    controls = {cell["content"][0]["props"]["model"]: cell["content"][0]
+                for cell in cells if "model" in cell["content"][0].get("props", {})}
+    assert defaults == {
+        "enabled": False, "api_key": "", "cron": "30 8 * * *", "jitter_minutes": 30,
+        "catch_up": True, "notification": "failure", "use_proxy": False, "proxy_url": "",
+        "run_once": False, "test_connection": False,
+    }
+    assert set(controls) == set(defaults)
+    assert len(controls) == sum("model" in cell["content"][0].get("props", {}) for cell in cells)
+    for model in ("api_key", "proxy_url"):
+        assert controls[model]["props"]["type"] == "password"
+        assert controls[model]["props"]["autocomplete"] == "off"
+    assert controls["jitter_minutes"]["props"]["min"] == 0
+    assert controls["jitter_minutes"]["props"]["max"] == 30
+    assert [item["value"] for item in controls["notification"]["props"]["items"]] == ["failure", "all", "off"]
+
+
+def test_form_grid_reserves_label_hint_spacing_and_stacks_on_mobile(plugin):
+    form, _ = plugin.get_form()
+    assert form[0]["component"] == "VForm"
+    row = form[0]["content"][0]
+    assert row["component"] == "VRow"
+    assert row["props"]["class"] == "ma-0"
+    for cell in row["content"]:
+        assert cell["component"] == "VCol"
+        assert cell["props"]["cols"] == 12
+        assert cell["props"]["class"] == "pa-2"
+        assert len(cell["content"]) == 1
+        control = cell["content"][0]
+        props = control.get("props", {})
+        assert cell["props"]["md"] == (6 if props.get("model") in ("cron", "jitter_minutes") else 12)
+        if control["component"] in ("VTextField", "VSelect"):
+            assert props["hide-details"] is False
+        if props.get("hint"):
+            assert props["persistent-hint"] is True
+
+
+def test_form_layout_has_no_runtime_or_default_mutation(plugin):
+    config = copy.deepcopy(plugin._config)
+    state = copy.deepcopy(plugin._state)
+    stored = copy.deepcopy(plugin.storage)
+    jobs = list(plugin._scheduler.jobs)
+    defaults_before = copy.deepcopy(core.DEFAULTS)
+    client = Mock()
+    plugin._client = lambda: client
+    _, returned_defaults = plugin.get_form()
+    returned_defaults["cron"] = "0 0 * * *"
+    assert core.DEFAULTS == defaults_before
+    assert plugin._config == config
+    assert plugin._state == state
+    assert plugin.storage == stored
+    assert list(plugin._scheduler.jobs) == jobs
+    client.request.assert_not_called()
+    plugin.update_config.assert_not_called()
+    plugin.post_message.assert_not_called()
+
+
 @pytest.mark.parametrize("changes", [
     {"protocolVersion": 2}, {"history": {}}, {"points": "100"}, {"date": "2026-09-99"},
     {"timezone": "UTC"}, {"alreadyCheckedIn": "false"}, {"account": {}}, {"reward": -5},

@@ -415,27 +415,42 @@ class HDBluePlugin:
                 scheduler.shutdown(wait=False)
 
     def get_form(self):
-        def control(component, model, label, **props):
-            return {"component": component, "props": {"model": model, "label": label, **props}}
+        """Keep floating labels and hints inside spaced, responsive grid cells."""
+        def cell(content, *, md=12):
+            return {"component": "VCol", "props": {"cols": 12, "md": md, "class": "pa-2"},
+                    "content": [content]}
 
-        return [{"component": "VForm", "content": [
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                "text": "在蓝影论坛个人设置 → MoviePilot 签到中生成专用密钥。签到以北京时间为准，奖励由论坛决定。"}},
+        def control(component, model, label, *, md=12, **props):
+            # Reserve the input details area even when it has no current hint.
+            return cell({"component": component, "props": {
+                "model": model, "label": label, "hide-details": component == "VSwitch", **props}}, md=md)
+
+        def section(title):
+            return cell({"component": "div", "props": {"class": "pt-2"}, "content": [
+                {"component": "VDivider", "props": {"class": "mb-3"}},
+                {"component": "h3", "props": {"class": "text-subtitle-1"}, "text": title},
+            ]})
+
+        return [{"component": "VForm", "content": [{"component": "VRow", "props": {"class": "ma-0"}, "content": [
+            cell({"component": "VAlert", "props": {"type": "info", "variant": "tonal",
+                "text": "在蓝影论坛个人设置 → MoviePilot 签到中生成专用密钥。签到以北京时间为准，奖励由论坛决定。"}}),
             control("VSwitch", "enabled", "启用自动签到"),
             control("VTextField", "api_key", "蓝影论坛签到密钥", type="password", autocomplete="off", placeholder="hdbmp_…"),
-            control("VTextField", "cron", "执行周期（北京时间）", placeholder="30 8 * * *", hint="五段 Cron，默认每天 08:30", **{"persistent-hint": True}),
-            control("VTextField", "jitter_minutes", "随机延迟上限（分钟）", type="number", min=0, max=30),
+            control("VTextField", "cron", "执行周期（北京时间）", md=6, placeholder="30 8 * * *", hint="五段 Cron，默认每天 08:30", **{"persistent-hint": True}),
+            control("VTextField", "jitter_minutes", "随机延迟上限（分钟）", md=6, type="number", min=0, max=30),
             control("VSwitch", "catch_up", "启动时执行当天已错过的签到"),
             control("VSelect", "notification", "结果通知", items=[{"title": "仅失败", "value": "failure"},
                 {"title": "全部结果", "value": "all"}, {"title": "关闭", "value": "off"}]),
+            section("代理设置"),
             control("VSwitch", "use_proxy", "使用指定代理"),
             control("VTextField", "proxy_url", "HTTP/HTTPS 代理地址", type="password", autocomplete="off",
                     hint="仅开启代理后使用，不读取系统环境代理", **{"persistent-hint": True}),
+            section("手动操作"),
             control("VSwitch", "test_connection", "保存后测试连接（只查询，不签到）"),
             control("VSwitch", "run_once", "保存后立即签到（执行后自动关闭）"),
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal",
-                "text": "测试连接与立即签到同时开启时，只执行连接测试。停用插件会清理待执行任务；不会自动补签往日或消费补签卡。"}},
-        ]}], dict(DEFAULTS)
+            cell({"component": "VAlert", "props": {"type": "info", "variant": "tonal",
+                "text": "测试连接与立即签到同时开启时，只执行连接测试。停用插件会清理待执行任务；不会自动补签往日或消费补签卡。"}}),
+        ]}]}], dict(DEFAULTS)
 
     def get_page(self):
         state = getattr(self, "_state", {})

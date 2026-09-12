@@ -9,8 +9,8 @@ from .core import HDBluePlugin
 class HDBlueSignin(HDBluePlugin, _PluginBase):
     plugin_name = "蓝影论坛签到"
     plugin_desc = "使用专用密钥自动签到蓝影论坛，支持随机错峰、结果通知与签到记录。"
-    plugin_icon = "https://hdblue.cc/icon.svg"
-    plugin_version = "1.0.0"
+    plugin_icon = "https://raw.githubusercontent.com/wzxcom/MoviePilot-Plugins/main/icons/hdblue-logo-004699311fe1.png"
+    plugin_version = "1.0.1"
     plugin_author = "wzxcom"
     author_url = "https://github.com/wzxcom"
     plugin_config_prefix = "hdbluesignin_"
