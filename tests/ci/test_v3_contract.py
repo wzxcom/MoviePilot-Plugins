@@ -7,6 +7,9 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_PATH = REPO_ROOT / "package.v3.json"
@@ -61,6 +64,27 @@ def _normalized_version(value: object, width: int = 4) -> tuple[int, ...]:
     return parsed + (0,) * (width - len(parsed))
 
 
+def _supports_v3_baseline(value: object) -> bool:
+    """Use the host's PEP 440 contract, allowing an explicit upper bound."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        specifier = SpecifierSet(value)
+    except InvalidSpecifier:
+        return False
+    return (specifier.contains("3.0.0", prereleases=True)
+            and not specifier.contains("2.999.999", prereleases=True))
+
+
+@pytest.mark.parametrize("value, expected", [
+    (">=3.0.0", True), (">=3.0.0,<4", True), (">=3,<4.0.0", True),
+    (">=2.0.0", False), ("<4", False), (">=4", False),
+    ("not-a-version", False), ("", False), (None, False),
+])
+def test_v3_system_version_uses_host_specifier_semantics(value, expected):
+    assert _supports_v3_baseline(value) is expected
+
+
 def test_v3_index_has_matching_dedicated_plugins() -> None:
     """V3 索引条目必须具有独立目录、最低系统版本和旧索引阻断标志。"""
     package = _load_json(PACKAGE_PATH)
@@ -69,7 +93,7 @@ def test_v3_index_has_matching_dedicated_plugins() -> None:
     assert package
     for plugin_id, metadata in package.items():
         assert (V3_ROOT / plugin_id.lower() / "__init__.py").is_file()
-        assert metadata.get("system_version") == ">=3.0.0"
+        assert _supports_v3_baseline(metadata.get("system_version")), plugin_id
         old_metadata = package_v2.get(plugin_id) or package_v1.get(plugin_id)
         assert old_metadata and old_metadata.get("v3") is False
 

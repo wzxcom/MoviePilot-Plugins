@@ -176,6 +176,8 @@ class HDBluePlugin:
             self._config = dict(DEFAULTS, **(config or {}))
             self._enabled = bool(self._config["enabled"])
             self._stopped = False
+            self._test_pending = False
+            self._deferred_cron = None
             self._config_error = ""
             self._trigger = None
             self._key = str(self._config["api_key"] or "").strip()
@@ -183,6 +185,8 @@ class HDBluePlugin:
             previous = self.get_data("state") or {}
             self._state = previous if previous.get("fingerprint") == self._fingerprint else {}
             self._state["fingerprint"] = self._fingerprint
+            if not self._cooldown_until(now_beijing()):
+                self._state.pop("notBefore", None)
             self.save_data("state", self._state)
             self._auth_blocked = bool(self._state.get("authBlocked"))
             try:
@@ -203,28 +207,64 @@ class HDBluePlugin:
             self._config.update(run_once=False, test_connection=False)
             if run_once or test_connection:
                 self.update_config(self._config)
-            if not self._key or self._config_error:
+            if not self._key or self._config_error or not (self._enabled or run_once or test_connection):
                 return
-            self._scheduler = BackgroundScheduler(timezone=TZ)
+            self._scheduler = BackgroundScheduler(timezone=TZ, executors={
+                "default": {"type": "threadpool", "max_workers": 1}})
             self._scheduler.start()
             if test_connection:
-                self._queue("test", now_beijing() + timedelta(seconds=2))
+                self._test_pending = True
+                if not self._queue("test", now_beijing() + timedelta(seconds=2)):
+                    self._test_pending = False
             elif run_once:
                 self._queue("manual", now_beijing() + timedelta(seconds=2))
             elif self._enabled and not self._auth_blocked:
-                pending = self._state.get("retry") or {}
                 now = now_beijing()
-                if pending.get("date") == now.date().isoformat():
-                    try:
-                        due = datetime.fromisoformat(pending["dueAt"])
-                        if due.tzinfo is None:
-                            raise ValueError()
-                        self._queue("auto", max(due, now + timedelta(seconds=15)), pending["date"])
-                        return
-                    except (ValueError, TypeError, KeyError):
-                        pass
-                if self._config["catch_up"] and self._due_today(now) and not self._done_today(now):
+                if (not self._restore_retry(self._generation)
+                        and not self._cooldown_until(now)
+                        and self._config["catch_up"] and self._due_today(now) and not self._done_today(now)):
                     self._queue("auto", self._initial_due(now, startup=True))
+            if not self._enabled and self._scheduler and not self._scheduler.get_jobs():
+                self.stop_service()
+
+    def _cooldown_until(self, now: datetime) -> datetime | None:
+        """Keep server Retry-After independent of a retry's local calendar day."""
+        try:
+            due = datetime.fromisoformat(self._state.get("notBefore", ""))
+            if due.tzinfo is not None and due > now:
+                return due.astimezone(TZ)
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    def _restore_retry(self, generation: int) -> bool:
+        """Restore only an existing same-day retry, without spending an attempt."""
+        if not self._active(generation) or not self._enabled or self._auth_blocked:
+            return False
+        pending = self._state.get("retry") or {}
+        if not pending:
+            return False
+        now = now_beijing()
+        today = now.date().isoformat()
+        attempts = self._state.get("attempts") or {}
+        exhausted = attempts.get("date") == today and attempts.get("count", 0) >= 3
+        if pending.get("date") == today and not self._done_today(now) and not exhausted:
+            try:
+                due = datetime.fromisoformat(pending["dueAt"])
+                if due.tzinfo is None:
+                    raise ValueError()
+                due = max(due.astimezone(TZ), now + timedelta(seconds=15), self._cooldown_until(now) or now)
+                if due.date().isoformat() == today:
+                    self._state["retry"] = {"date": today, "dueAt": due.isoformat()}
+                    self.save_data("state", self._state)
+                    if self._active(generation):
+                        return self._queue("auto", due, today)
+                    return False
+            except (ValueError, TypeError, KeyError):
+                pass
+        self._state.pop("retry", None)
+        self.save_data("state", self._state)
+        return False
 
     def _initial_due(self, now: datetime, *, startup: bool = False) -> datetime:
         midnight = datetime.combine(now.date() + timedelta(days=1), time.min, TZ)
@@ -261,31 +301,48 @@ class HDBluePlugin:
                  "kwargs": {"coalesce": True, "max_instances": 1, "misfire_grace_time": 3600}}]
 
     def scheduled_checkin(self):
-        if not self._run_lock.acquire(blocking=False):
-            return
-        try:
-            if self._stopped or not self._enabled or self._auth_blocked or self._done_today(now_beijing()):
+        generation = self._generation
+        target_date = now_beijing().date().isoformat()
+        with self._run_lock:
+            now = now_beijing()
+            if (not self._active(generation) or target_date != now.date().isoformat()
+                    or not self._enabled or self._auth_blocked or self._done_today(now)
+                    or self._cooldown_until(now)):
+                return
+            if self._test_pending:
+                self._deferred_cron = (generation, target_date)
                 return
             pending = self._state.get("retry") or {}
-            if pending.get("date") == now_beijing().date().isoformat():
+            if pending.get("date") == target_date:
                 return
-            if self._scheduler and any(job.id == "checkin" for job in self._scheduler.get_jobs()):
+            if self._scheduler and any(job.id in ("test", "checkin") for job in self._scheduler.get_jobs()):
                 # Frequent Cron ticks must not keep postponing a jittered run.
                 return
-            self._queue("auto", self._initial_due(now_beijing()))
-        finally:
-            self._run_lock.release()
+            self._queue("auto", self._initial_due(now), target_date)
 
-    def _queue(self, mode: str, due: datetime, target_date: str = ""):
+    def _finish_connection_test(self, generation: int, target_date: str):
+        """Resume existing work, but never turn an isolated connection test into a sign-in."""
+        self._test_pending = False
+        deferred_cron = self._deferred_cron
+        self._deferred_cron = None
+        restored = self._restore_retry(generation)
+        now = now_beijing()
+        if (not restored and self._active(generation) and self._enabled and not self._auth_blocked
+                and deferred_cron == (generation, target_date) and target_date == now.date().isoformat()
+                and not self._done_today(now) and not self._cooldown_until(now)):
+            self._queue("auto", self._initial_due(now), target_date)
+
+    def _queue(self, mode: str, due: datetime, target_date: str = "") -> bool:
         if self._stopped or not self._scheduler:
-            return
+            return False
         target_date = target_date or now_beijing().date().isoformat()
         if due.date().isoformat() != target_date:
-            return
+            return False
         job_id = "test" if mode == "test" else "checkin"
-        self._scheduler.add_job(self._run, "date", run_date=due, id=job_id,
+        self._scheduler.add_job(self._run_scheduled, "date", run_date=due, id=job_id,
                                 kwargs={"mode": mode, "target_date": target_date, "generation": self._generation},
                                 replace_existing=True, misfire_grace_time=300, max_instances=1)
+        return True
 
     def _active(self, generation: int) -> bool:
         return not self._stopped and generation == self._generation
@@ -294,10 +351,31 @@ class HDBluePlugin:
         return ForumClient(self._key, self._proxy)
 
     def _run(self, mode: str, target_date: str, generation: int):
+        """Allow a direct callback to skip when another execution owns the lock."""
         if not self._run_lock.acquire(blocking=False):
             return
         try:
+            self._execute_run(mode, target_date, generation)
+        finally:
+            self._run_lock.release()
+
+    def _run_scheduled(self, mode: str, target_date: str, generation: int):
+        """A dequeued date job must wait, not disappear during lock contention."""
+        with self._run_lock:
+            self._execute_run(mode, target_date, generation)
+
+    def _execute_run(self, mode: str, target_date: str, generation: int):
+        """Execute with the instance lock held; validate generation after waiting."""
+        try:
             if not self._active(generation) or target_date != now_beijing().date().isoformat():
+                return
+            cooldown = self._cooldown_until(now_beijing())
+            if cooldown:
+                if mode == "auto":
+                    self._restore_retry(generation)
+                else:
+                    self._record(None, "等待冷却", "论坛要求在 " + cooldown.strftime("%m-%d %H:%M:%S")
+                                 + " 北京时间后再试", generation=generation, notify=False)
                 return
             if mode == "auto" and (not self._enabled or self._auth_blocked or self._done_today(now_beijing())):
                 return
@@ -319,6 +397,8 @@ class HDBluePlugin:
                 if mode == "test":
                     self._auth_blocked = False
                     self._state["authBlocked"] = False
+                    if payload["date"] == target_date and payload["alreadyCheckedIn"]:
+                        self._state.pop("retry", None)
                     self._record(payload, "连接成功", "密钥有效，已更新账号与签到状态", generation=generation, notify=False)
                     return
                 if payload["date"] != target_date or target_date != now_beijing().date().isoformat():
@@ -358,6 +438,11 @@ class HDBluePlugin:
                 if error.auth:
                     self._auth_blocked = True
                     self._state["authBlocked"] = True
+                    self._state.pop("retry", None)
+                if error.retry_after:
+                    now = now_beijing()
+                    not_before = max(now + timedelta(seconds=error.retry_after), self._cooldown_until(now) or now)
+                    self._state["notBefore"] = not_before.isoformat()
                 retry = None
                 if mode != "test" and self._enabled and error.retryable and count < 3 and not self._auth_blocked:
                     # Manual attempts share the day's automatic retry budget.
@@ -376,7 +461,11 @@ class HDBluePlugin:
                 self._record(None, "结果待确认" if error.uncertain else "失败", message,
                              generation=generation, notify=mode != "test", failed=True)
         finally:
-            self._run_lock.release()
+            if self._active(generation):
+                if mode == "test":
+                    self._finish_connection_test(generation, target_date)
+                if not self._enabled:
+                    self.stop_service()
 
     def _record(self, payload: dict | None, result: str, message: str,
                 *, generation: int, notify: bool = True, failed: bool = False):
@@ -406,6 +495,8 @@ class HDBluePlugin:
     def stop_service(self):
         self._stopped = True
         self._enabled = False
+        self._test_pending = False
+        self._deferred_cron = None
         self._generation = getattr(self, "_generation", 0) + 1
         scheduler = getattr(self, "_scheduler", None)
         self._scheduler = None

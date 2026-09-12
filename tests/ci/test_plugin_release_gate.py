@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -45,7 +46,7 @@ def _write_fixture(repo: Path, package_version: str, source_version: str) -> Non
 
 def _run_checker(repo: Path, *package_files: Path | str) -> subprocess.CompletedProcess[str]:
     """从指定目录运行 checker，便于覆盖 cwd 与 package 路径组合。"""
-    args = ["python3", str(CHECKER)]
+    args = [sys.executable, str(CHECKER)]
     args.extend(str(package_file) for package_file in package_files)
     return subprocess.run(
         args,
@@ -300,7 +301,7 @@ def test_pr_workflow_runs_gate_for_every_main_pull_request() -> None:
 def test_current_repository_passes_version_gate() -> None:
     """启用 Ruleset 前真实 main 基线必须通过，否则所有 PR 都无法合并。"""
     result = subprocess.run(
-        ["python3", str(CHECKER), "package.json", "package.v2.json", "package.v3.json"],
+        [sys.executable, str(CHECKER), "package.json", "package.v2.json", "package.v3.json"],
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,

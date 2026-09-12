@@ -47,7 +47,15 @@ if str(_BACKEND_PATH) not in sys.path:
     sys.path.insert(0, str(_BACKEND_PATH))
 
 _bootstrap = import_module("app.testing.bootstrap")
-block_real_network = import_module("app.testing.network_guard").block_real_network
+try:
+    _network = import_module("app.testing.network_guard")
+except ModuleNotFoundError as error:
+    # Official V3.0.0 exposes the same guard as app.testing.network. Do not
+    # swallow a missing dependency from inside an otherwise present module.
+    if error.name != "app.testing.network_guard":
+        raise
+    _network = import_module("app.testing.network")
+block_real_network = _network.block_real_network
 
 
 def isolate_config_dir() -> str:

@@ -33,13 +33,30 @@ tests/
 `tests/run.py` 把 v1/v2/v3 放在独立子进程依次运行、无用例的代自动跳过——不同代存在同名
 插件包（如 `brushflowlowfreq`、`torrentclassifier`），同一解释器进程无法同时加载、混跑
 会相互覆盖。隔离 `CONFIG_DIR`、建表、`app.helper.sites` 垫片、插件目录注入、v1/v2/v3 marker、
-autouse 网络守卫等引导逻辑统一在主程序 `app/testing`（`bootstrap` / `network_guard`）维护一处；
+autouse 网络守卫等引导逻辑统一在主程序 `app/testing`（`bootstrap` / `network`，兼容 `network_guard`）维护一处；
 本仓 `tests/_bootstrap.py` 仅是「定位后端入 `sys.path`」的薄壳 shim，故后端需为含 `app/testing/bootstrap`
 的较新 MoviePilot。共享 harness（`stub_modules` 等）在 bootstrap 后可直接复用。
 
 ## 提 PR / push 前
 
 先本地 `python tests/run.py` 跑**全量并确认通过**，再 push / 提 PR。
+
+### 蓝影论坛签到：真实 V3 宿主回归
+
+验证基线为官方 MoviePilot `v3.0.0`（`473212b900d03d983b9c963ff08032180703ca18`），
+使用其 `.venv` 和锁定依赖。测试使用官方引导与插件系统组合 fixture，不伪造 `app` 包或基类；
+V3 集成用例另外覆盖真实 SQLite 配置/数据、官方分身加载、定时服务注册以及真实线程退出。
+
+```bash
+# 清除继承的 CONFIG_DIR，由官方引导生成并在退出时清理专用临时目录。
+# 不要在带生产数据库/缓存连接配置的环境中运行测试。
+env -u CONFIG_DIR ../MoviePilot/.venv/bin/python -m pytest tests/v3/hdbluesignin -q
+env -u CONFIG_DIR ../MoviePilot/.venv/bin/python -m pytest tests/v2/hdbluesignin -q
+env -u CONFIG_DIR ../MoviePilot/.venv/bin/python -m pytest tests/ci -q
+```
+
+官方网络守卫禁止外网，论坛响应仅在 HTTP 边界模拟。V2 在此解释器中的运行验证共享逻辑
+与兼容入口，不等同于真实 V2 生产宿主验收；V3 集成通过也不替代升级后的实际页面检查。
 
 ## 新增用例
 
